@@ -978,22 +978,76 @@ func TestStatefulSetControlRollingUpdateWithMaxUnavailableInOrderedModeVerifyInv
 	// to add more params here.
 	testCases := []struct {
 		ordinalOfPodToTerminate []int
+		ordinalOfPodUnavailable map[int]struct{}
+		expectedPodsAfterUpdate int
 	}{
-
-		{[]int{}},
-		{[]int{5}},
-		{[]int{3}},
-		{[]int{4}},
-		{[]int{5, 4}},
-		{[]int{5, 3}},
-		{[]int{4, 3}},
-		{[]int{5, 4, 3}},
-		{[]int{2}}, // note this is an ordinal greater than partition(3)
-		{[]int{1}}, // note this is an ordinal greater than partition(3)
+		// maxUnavailable is 2 in setupForInvariant
+		{
+			ordinalOfPodToTerminate: []int{},
+			expectedPodsAfterUpdate: 4,
+		},
+		{
+			ordinalOfPodToTerminate: []int{5},
+			expectedPodsAfterUpdate: 5,
+		},
+		{
+			ordinalOfPodToTerminate: []int{3},
+			expectedPodsAfterUpdate: 5,
+		},
+		{
+			ordinalOfPodToTerminate: []int{4},
+			expectedPodsAfterUpdate: 5,
+		},
+		{
+			ordinalOfPodToTerminate: []int{5, 4},
+			expectedPodsAfterUpdate: 6,
+		},
+		{
+			ordinalOfPodToTerminate: []int{5, 3},
+			expectedPodsAfterUpdate: 6,
+		},
+		{
+			ordinalOfPodToTerminate: []int{4, 3},
+			expectedPodsAfterUpdate: 6,
+		},
+		{
+			ordinalOfPodToTerminate: []int{5, 4, 3},
+			expectedPodsAfterUpdate: 6,
+		},
+		{
+			ordinalOfPodToTerminate: []int{2}, // note this is an ordinal greater than partition(3)
+			expectedPodsAfterUpdate: 5,
+		},
+		{
+			ordinalOfPodToTerminate: []int{1}, // note this is an ordinal greater than partition(3)
+			expectedPodsAfterUpdate: 5,
+		},
+		{
+			ordinalOfPodUnavailable: map[int]struct{}{
+				4: {},
+				5: {},
+			},
+			expectedPodsAfterUpdate: 6,
+		},
+		{
+			ordinalOfPodUnavailable: map[int]struct{}{
+				4: {},
+			},
+			expectedPodsAfterUpdate: 5,
+		},
+		{
+			ordinalOfPodToTerminate: []int{5},
+			ordinalOfPodUnavailable: map[int]struct{}{
+				4: {},
+			},
+			expectedPodsAfterUpdate: 6,
+		},
 	}
 	for _, tc := range testCases {
 		defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MaxUnavailableStatefulSet, true)()
-		set, spc, ssc, maxUnavailable, totalPods := setupForInvariant(t)
+		set, spc, ssc, _, totalPods := setupForInvariant(t)
+		minReadySecs := 3600
+		setMinReadySeconds(set, int32(minReadySecs))
 		t.Run(fmt.Sprintf("terminating pod at ordinal %d", tc.ordinalOfPodToTerminate), func(t *testing.T) {
 			status := apps.StatefulSetStatus{Replicas: int32(totalPods)}
 			updateRevision := &apps.ControllerRevision{}
@@ -1003,6 +1057,14 @@ func TestStatefulSetControlRollingUpdateWithMaxUnavailableInOrderedModeVerifyInv
 				_, err := spc.addTerminatingPod(set, tc.ordinalOfPodToTerminate[i])
 				if err != nil {
 					t.Fatal(err)
+				}
+			}
+
+			for i := 0; i < totalPods; i++ {
+				if _, ok := tc.ordinalOfPodUnavailable[i]; ok {
+					spc.setPodAvailable(set, i, time.Now())
+				} else {
+					spc.setPodAvailable(set, i, time.Now().Add(time.Duration(-minReadySecs)*time.Second))
 				}
 			}
 
@@ -1033,15 +1095,16 @@ func TestStatefulSetControlRollingUpdateWithMaxUnavailableInOrderedModeVerifyInv
 
 			sort.Sort(ascendingOrdinal(pods))
 
-			expecteddPodsToBeDeleted := maxUnavailable.IntValue() - len(tc.ordinalOfPodToTerminate)
-			if expecteddPodsToBeDeleted < 0 {
-				expecteddPodsToBeDeleted = 0
+			podsUnavailableOrTerminating := map[int]struct{}{}
+			for _, ordinal := range tc.ordinalOfPodToTerminate {
+				podsUnavailableOrTerminating[ordinal] = struct{}{}
+			}
+			for ordinal := range tc.ordinalOfPodUnavailable {
+				podsUnavailableOrTerminating[ordinal] = struct{}{}
 			}
 
-			expectedPodsAfterUpdate := totalPods - expecteddPodsToBeDeleted
-
-			if len(pods) != expectedPodsAfterUpdate {
-				t.Errorf("Expected pods %v, got pods %v", expectedPodsAfterUpdate, len(pods))
+			if len(pods) != tc.expectedPodsAfterUpdate {
+				t.Errorf("Expected pods %v, got pods %v", tc.expectedPodsAfterUpdate, len(pods))
 			}
 
 		})
