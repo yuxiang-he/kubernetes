@@ -157,35 +157,32 @@ func TestStatefulSetControllerRespectsMinReadySecs(t *testing.T) {
 	} else {
 		set = obj.(*apps.StatefulSet)
 	}
-	if set.Status.Replicas != int32(numReplicas) {
-		t.Errorf("set.Status.Replicas = %v; want %v", set.Status.Replicas, numReplicas)
-	}
-	pods, err := om.setPodReady(set, 0)
+	pods, err := om.setPodRunning(set, 0)
 	if err != nil {
 		t.Error(err)
 	}
-	err = ssc.syncStatefulSet(context.TODO(), set, pods)
+	pods, err = om.setPodReady(set, 0)
 	if err != nil {
 		t.Error(err)
 	}
-	selector, err := metav1.LabelSelectorAsSelector(set.Spec.Selector)
+	enqueueDuration, err := ssc.syncStatefulSet(context.TODO(), set, pods)
 	if err != nil {
 		t.Error(err)
 	}
-	pods, err = om.podsLister.Pods(set.Namespace).List(selector)
+	time.Sleep(time.Duration(5) * time.Second)
+	enqueueDuration2, err := ssc.syncStatefulSet(context.TODO(), set, pods)
 	if err != nil {
 		t.Error(err)
 	}
-	if isRunningAndAvailable(pods[0], minReadySecs) {
-		t.Fatalf("Pod is available earlier than expected")
+	if enqueueDuration == nil || enqueueDuration2 == nil {
+		t.Fatalf("syncStatefulSet did not enqueue StatefulSet update")
 	}
-	time.Sleep(time.Duration(minReadySecs) * time.Second)
-	pods, err = om.podsLister.Pods(set.Namespace).List(selector)
-	if err != nil {
-		t.Error(err)
+	minReadyDuration := time.Duration(minReadySecs) * time.Second
+	if *enqueueDuration == minReadyDuration || *enqueueDuration2 == minReadyDuration {
+		t.Fatalf("syncStatefulSet enqueued sync for full MinReadySeconds")
 	}
-	if !isRunningAndAvailable(pods[0], minReadySecs) {
-		t.Fatalf("Pod is not available after minReadySecs")
+	if !(*enqueueDuration > *enqueueDuration2) {
+		t.Fatalf("syncStatefulSet second enqueue duration is longer than the first")
 	}
 }
 
