@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"testing"
 	"time"
@@ -165,11 +166,13 @@ func TestStatefulSetControllerRespectsMinReadySecs(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+	// both enqueue duration need to be until the pod becomes available, which is sooner than waiting minReadySecs
 	enqueueDuration, err := ssc.syncStatefulSet(context.TODO(), set, pods)
 	if err != nil {
 		t.Error(err)
 	}
-	time.Sleep(time.Duration(5) * time.Second)
+	timeDifferenceSeconds := 7
+	time.Sleep(time.Duration(timeDifferenceSeconds) * time.Second)
 	enqueueDuration2, err := ssc.syncStatefulSet(context.TODO(), set, pods)
 	if err != nil {
 		t.Error(err)
@@ -181,8 +184,8 @@ func TestStatefulSetControllerRespectsMinReadySecs(t *testing.T) {
 	if *enqueueDuration == minReadyDuration || *enqueueDuration2 == minReadyDuration {
 		t.Fatalf("syncStatefulSet enqueued sync for full MinReadySeconds")
 	}
-	if !(*enqueueDuration > *enqueueDuration2) {
-		t.Fatalf("syncStatefulSet second enqueue duration is longer than the first")
+	if math.Round((*enqueueDuration - *enqueueDuration2).Seconds()) != float64(timeDifferenceSeconds) {
+		t.Fatalf("syncStatefulSet second enqueue duration %v is longer than the first %v", enqueueDuration2, enqueueDuration)
 	}
 }
 
