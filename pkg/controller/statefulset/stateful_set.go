@@ -469,23 +469,44 @@ func (ssc *StatefulSetController) sync(ctx context.Context, key string) error {
 		return err
 	}
 
-	return ssc.syncStatefulSet(ctx, set, pods)
+	_, err = ssc.syncStatefulSet(ctx, set, pods)
+	return err
 }
 
 // syncStatefulSet syncs a tuple of (statefulset, []*v1.Pod).
-func (ssc *StatefulSetController) syncStatefulSet(ctx context.Context, set *apps.StatefulSet, pods []*v1.Pod) error {
+func (ssc *StatefulSetController) syncStatefulSet(ctx context.Context, set *apps.StatefulSet, pods []*v1.Pod) (*time.Duration, error) {
 	klog.V(4).Infof("Syncing StatefulSet %v/%v with %d pods", set.Namespace, set.Name, len(pods))
 	var status *apps.StatefulSetStatus
 	var err error
 	status, err = ssc.control.UpdateStatefulSet(ctx, set, pods)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	klog.V(4).Infof("Successfully synced StatefulSet %s/%s successful", set.Namespace, set.Name)
 	// One more sync to handle the clock skew. This is also helping in requeuing right after status update
 	if set.Spec.MinReadySeconds > 0 && status != nil && status.AvailableReplicas != *set.Spec.Replicas {
-		ssc.enqueueSSAfter(set, time.Duration(set.Spec.MinReadySeconds)*time.Second)
+		enqueueAfterDuration := time.Duration(set.Spec.MinReadySeconds) * time.Second
+		nowTime := time.Now()
+		podsRunningAndAvailable := 0
+		for _, pod := range pods {
+			if isRunningAndReady(pod) && !isRunningAndAvailable(pod, set.Spec.MinReadySeconds) {
+				readyCondition := podutil.GetPodReadyCondition(pod.Status)
+				podAvailableTime := readyCondition.LastTransitionTime.Time.Add(time.Duration(set.Spec.MinReadySeconds) * time.Second)
+				if podAvailableTime.Sub(nowTime) < enqueueAfterDuration {
+					enqueueAfterDuration = podAvailableTime.Sub(nowTime)
+				}
+			} else if isRunningAndAvailable(pod, set.Spec.MinReadySeconds) {
+				podsRunningAndAvailable += 1
+			}
+		}
+		if podsRunningAndAvailable == len(pods) {
+			// All pods are actually available
+			// This is likely due to a clock skew between when status.AvailableReplicas is updated and the above loop
+			enqueueAfterDuration = time.Duration(0)
+		}
+		ssc.enqueueSSAfter(set, enqueueAfterDuration)
+		return &enqueueAfterDuration, nil
 	}
 
-	return nil
+	return nil, nil
 }
